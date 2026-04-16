@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gestational Diabetes CGM Analyzer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <style>
+        body { background-color: #f8fafc; overflow-x: hidden; }
+        .metric-card { background: white; padding: 1.5rem; border-radius: 0.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .chart-container { background: white; padding: 1.5rem; border-radius: 0.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-top: 1.5rem; width: 100%; }
+        .plotly-graph-div { width: 100% !important; }
+    </style>
+</head>
+<body class="text-slate-800 font-sans p-4 md:p-6">
+
+    <div class="w-full mx-auto">
+        
+        <!-- Header & Upload -->
+        <div class="flex flex-col md:flex-row justify-between items-center mb-6 bg-white p-6 rounded-lg shadow-sm">
+            <div>
+                <h1 class="text-3xl font-bold text-blue-600">Gestational Diabetes CGM Analyzer</h1>
+                <p class="text-slate-500 mt-2">Target Range: <span class="font-semibold text-green-600">3.5 - 7.8 mmol/L</span></p>
+            </div>
+            <div class="mt-4 md:mt-0 min-w-[300px]">
+                <label class="block text-sm font-medium text-gray-700 mb-2">Upload FreeStyle Libre CSV</label>
+                <input type="file" id="csvFileInput" accept=".csv" class="block w-full text-sm text-slate-500
+                    file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0
+                    file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700
+                    hover:file:bg-blue-100 cursor-pointer">
+            </div>
+        </div>
+
+        <!-- Dashboard -->
+        <div id="dashboard" class="hidden">
+            
+            <!-- Summary Metrics -->
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
+                <div class="metric-card border-l-4 border-blue-500">
+                    <h3 class="text-sm text-slate-500 font-medium">Average Glucose</h3>
+                    <p class="text-3xl font-bold mt-2" id="avgGlucose">--</p>
+                    <p class="text-sm text-slate-400 mt-1">mmol/L</p>
+                </div>
+                <div class="metric-card border-l-4 border-green-500">
+                    <h3 class="text-sm text-slate-500 font-medium">Time in Target (3.5 - 7.8)</h3>
+                    <p class="text-3xl font-bold mt-2 text-green-600" id="timeInRange">--</p>
+                    <p class="text-sm text-slate-400 mt-1">% of total readings</p>
+                </div>
+                <div class="metric-card border-l-4 border-red-500">
+                    <h3 class="text-sm text-slate-500 font-medium">Time Below (< 3.5)</h3>
+                    <p class="text-3xl font-bold mt-2 text-red-500" id="timeBelow">--</p>
+                    <p class="text-sm text-slate-400 mt-1">Hypo risk</p>
+                </div>
+                <div class="metric-card border-l-4 border-purple-500">
+                    <h3 class="text-sm text-slate-500 font-medium">Time Above (> 7.8)</h3>
+                    <p class="text-3xl font-bold mt-2 text-purple-500" id="timeAbove">--</p>
+                    <p class="text-sm text-slate-400 mt-1">Hyper risk</p>
+                </div>
+            </div>
+
+            <!-- Main Timeline Chart -->
+            <div class="chart-container">
+                <div class="flex justify-between items-end mb-2">
+                    <div>
+                        <h2 class="text-2xl font-bold">Interactive Glucose Timeline</h2>
+                        <p class="text-sm text-slate-500 mt-1">
+                            <strong>Tip:</strong> The view defaults to the <strong>latest 24 hours</strong>. 
+                            Click and drag the sliding box inside the mini-map at the bottom to smoothly scroll across days.
+                        </p>
+                    </div>
+                </div>
+                <div id="timelineContainer">
+                    <div id="timelineChart" style="height: 600px; width: 100%;"></div>
+                </div>
+            </div>
+
+            <!-- Secondary Charts -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div class="chart-container">
+                    <h2 class="text-xl font-bold mb-2">Daily Time in Range</h2>
+                    <p class="text-sm text-slate-500 mb-4">Percentage breakdown per day. <strong class="text-blue-600">👆 Click on any bar to view that specific day in the timeline above.</strong></p>
+                    <div id="dailyChart" style="height: 400px; width: 100%;"></div>
+                </div>
+                <div class="chart-container">
+                    <h2 class="text-xl font-bold mb-2">Hourly Averages</h2>
+                    <p class="text-sm text-slate-500 mb-4">Boxplot distribution by hour.</p>
+                    <div id="hourlyChart" style="height: 400px; width: 100%;"></div>
+                </div>
+            </div>
+
+            <!-- AGP Chart (New) -->
+            <div class="chart-container mb-10">
+                <div class="flex justify-between items-end mb-4">
+                    <div>
+                        <h2 class="text-2xl font-bold">Ambulatory Glucose Profile (AGP)</h2>
+                        <p class="text-sm text-slate-500 mt-1">
+                            Aggregated standard 24-hour pattern. The dark blue line is your median (50%), the dark band is your typical range (25-75%), and the light band captures extreme highs/lows (5-95%).
+                        </p>
+                    </div>
+                </div>
+                <div id="agpChart" style="height: 450px; width: 100%;"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const TARGET_MIN = 3.5;
+        const TARGET_MAX = 7.8;
+
+        document.getElementById('csvFileInput').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                let csvText = event.target.result;
+
+                if (csvText.startsWith("Glucose Data")) {
+                    csvText = csvText.substring(csvText.indexOf('\n') + 1);
+                }
+
+                Papa.parse(csvText, {
+                    header: true,
+                    skipEmptyLines: true,
+                    complete: function(results) {
+                        processData(results.data);
+                    }
+                });
+            };
+            reader.readAsText(file);
+        });
+
+        function parseDate(dateStr) {
+            if (!dateStr) return null;
+            const parts = dateStr.trim().split(' ');
+            if (parts.length < 2) return null;
+            
+            const dateParts = parts[0].split('-');
+            const timeParts = parts[1].split(':');
+            
+            if (dateParts.length !== 3 || timeParts.length < 2) return null;
+            return new Date(dateParts[2], dateParts[1] - 1, dateParts[0], timeParts[0], timeParts[1]);
+        }
+
+        function toPlotlyDate(d) {
+            return d.getFullYear() + '-' + 
+                   String(d.getMonth() + 1).padStart(2, '0') + '-' + 
+                   String(d.getDate()).padStart(2, '0') + ' ' + 
+                   String(d.getHours()).padStart(2, '0') + ':' + 
+                   String(d.getMinutes()).padStart(2, '0') + ':00';
+        }
+
+        function processData(rawData) {
+            let validReadings = [];
+            let notesData = [];
+
+            rawData.forEach(row => {
+                const ts = parseDate(row['Device Timestamp']);
+                if (!ts) return;
+
+                let hist = parseFloat(row['Historic Glucose mmol/L']);
+                let scan = parseFloat(row['Scan Glucose mmol/L']);
+                let glucose = !isNaN(hist) ? hist : (!isNaN(scan) ? scan : null);
+                let notes = row['Notes'] ? row['Notes'].trim() : null;
+
+                if (glucose !== null) validReadings.push({ ts, glucose });
+                if (notes) notesData.push({ ts, notes });
+            });
+
+            validReadings.sort((a, b) => a.ts - b.ts);
+
+            if (validReadings.length === 0) {
+                alert("No valid glucose data found in the CSV. Please check the file format.");
+                return;
+            }
+
+            document.getElementById('dashboard').classList.remove('hidden');
+
+            calculateMetrics(validReadings);
+            drawTimeline(validReadings, notesData);
+            drawDailyTIR(validReadings);
+            drawHourlyProfile(validReadings);
+            drawAGP(validReadings); // Render the new AGP
+        }
+
+        function calculateMetrics(data) {
+            let total = data.length;
+            let inRange = 0, below = 0, sum = 0;
+
+            data.forEach(d => {
+                sum += d.glucose;
+                if (d.glucose < TARGET_MIN) below++;
+                else if (d.glucose <= TARGET_MAX) inRange++;
+            });
+
+            let above = total - inRange - below;
+
+            document.getElementById('avgGlucose').innerText = (sum / total).toFixed(1);
+            document.getElementById('timeInRange').innerText = ((inRange / total) * 100).toFixed(1) + "%";
+            document.getElementById('timeBelow').innerText = ((below / total) * 100).toFixed(1) + "%";
+            document.getElementById('timeAbove').innerText = ((above / total) * 100).toFixed(1) + "%";
+        }
+
+        function drawTimeline(data, notes) {
+            const xDataPlotly = data.map(d => toPlotlyDate(d.ts));
+            const yData = data.map(d => d.glucose);
+            
+            const maxDateObj = data[data.length - 1].ts;
+            const minDateObj = new Date(maxDateObj.getTime() - (24 * 60 * 60 * 1000));
+            
+            const maxDateStr = toPlotlyDate(maxDateObj);
+            const minDateStr = toPlotlyDate(minDateObj);
+
+            const traces = [];
+            traces.push({ x: xDataPlotly, y: yData, type: 'scatter', mode: 'lines+markers', name: 'Glucose', line: { color: '#3b82f6', width: 2 }, marker: { size: 4 } });
+
+            if (notes.length > 0) {
+                traces.push({
+                    x: notes.map(n => toPlotlyDate(n.ts)), y: notes.map(() => TARGET_MAX), 
+                    type: 'scatter', mode: 'markers', name: 'Meals/Notes', text: notes.map(n => n.notes), hoverinfo: 'text',
+                    marker: { symbol: 'triangle-down', size: 14, color: '#ef4444' }
+                });
+            }
+
+            const layout = {
+                autosize: true, margin: { t: 20, l: 40, r: 20, b: 20 }, hovermode: 'x unified',
+                xaxis: { 
+                    type: 'date', range: [minDateStr, maxDateStr], autorange: false,
+                    rangeslider: { visible: true, thickness: 0.12, autorange: true },
+                },
+                yaxis: { title: 'mmol/L' },
+                shapes: [{ type: 'rect', xref: 'paper', x0: 0, x1: 1, yref: 'y', y0: TARGET_MIN, y1: TARGET_MAX, fillcolor: '#22c55e', opacity: 0.15, line: { width: 0 }, layer: 'below' }]
+            };
+
+            Plotly.newPlot('timelineChart', traces, layout, { responsive: true, displayModeBar: false });
+        }
+
+        function drawDailyTIR(data) {
+            const dailyCounts = {};
+
+            data.forEach(d => {
+                const dayStr = d.ts.getFullYear() + '-' + String(d.ts.getMonth()+1).padStart(2, '0') + '-' + String(d.ts.getDate()).padStart(2, '0');
+                if (!dailyCounts[dayStr]) dailyCounts[dayStr] = { below: 0, inRange: 0, above: 0, total: 0 };
+                dailyCounts[dayStr].total++;
+                if (d.glucose < TARGET_MIN) dailyCounts[dayStr].below++;
+                else if (d.glucose <= TARGET_MAX) dailyCounts[dayStr].inRange++;
+                else dailyCounts[dayStr].above++;
+            });
+
+            const days = Object.keys(dailyCounts).sort();
+            const belowPct = days.map(day => (dailyCounts[day].below / dailyCounts[day].total) * 100);
+            const inPct = days.map(day => (dailyCounts[day].inRange / dailyCounts[day].total) * 100);
+            const abovePct = days.map(day => (dailyCounts[day].above / dailyCounts[day].total) * 100);
+
+            const traces = [
+                { x: days, y: belowPct, name: 'Below', type: 'bar', marker: { color: '#ef4444' } },
+                { x: days, y: inPct, name: 'In Range', type: 'bar', marker: { color: '#22c55e' } },
+                { x: days, y: abovePct, name: 'Above', type: 'bar', marker: { color: '#a855f7' } }
+            ];
+
+            const layout = { autosize: true, barmode: 'stack', margin: { t: 10, l: 40, r: 20, b: 40 }, yaxis: { title: '% of Readings', range: [0, 100] } };
+
+            Plotly.newPlot('dailyChart', traces, layout, {responsive: true});
+
+            const dailyChartDiv = document.getElementById('dailyChart');
+            dailyChartDiv.removeAllListeners('plotly_click');
+            dailyChartDiv.on('plotly_click', function(clickData) {
+                if (clickData.points && clickData.points.length > 0) {
+                    const clickedDate = clickData.points[0].x; 
+                    const rangeStart = clickedDate + " 00:00:00";
+                    const rangeEnd = clickedDate + " 23:59:59";
+                    Plotly.relayout('timelineChart', { 'xaxis.range': [rangeStart, rangeEnd] });
+                    document.getElementById('timelineContainer').scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+            });
+        }
+
+        function drawHourlyProfile(data) {
+            const xHours = data.map(d => d.ts.getHours());
+            const yGlucose = data.map(d => d.glucose);
+            const trace = { x: xHours, y: yGlucose, type: 'box', boxpoints: 'all', jitter: 0.3, pointpos: -1.8, marker: { color: '#636efa', size: 3 }, name: 'Glucose' };
+            const layout = {
+                autosize: true, margin: { t: 10, l: 40, r: 20, b: 40 },
+                xaxis: { title: 'Hour of Day (0-23)', tickmode: 'linear', dtick: 1, range: [-1, 24] },
+                yaxis: { title: 'mmol/L' },
+                shapes: [{ type: 'rect', xref: 'paper', x0: 0, x1: 1, yref: 'y', y0: TARGET_MIN, y1: TARGET_MAX, fillcolor: '#22c55e', opacity: 0.15, line: { width: 0 }, layer: 'below' }]
+            };
+            Plotly.newPlot('hourlyChart', [trace], layout, {responsive: true});
+        }
+
+        // --- NEW FEATURE: AMBULATORY GLUCOSE PROFILE (AGP) ---
+        function getPercentile(arr, p) {
+            if (arr.length === 0) return null;
+            if (arr.length === 1) return arr[0];
+            arr.sort((a, b) => a - b);
+            const index = (arr.length - 1) * p;
+            const lower = Math.floor(index);
+            const upper = lower + 1;
+            const weight = index - lower;
+            if (upper >= arr.length) return arr[lower];
+            return arr[lower] * (1 - weight) + arr[upper] * weight;
+        }
+
+        function drawAGP(data) {
+            // Create 96 buckets (15-minute intervals in 24 hours)
+            const buckets = Array.from({length: 96}, () => []);
+
+            data.forEach(d => {
+                const totalMins = d.ts.getHours() * 60 + d.ts.getMinutes();
+                let bucketIdx = Math.floor(totalMins / 15);
+                if (bucketIdx >= 96) bucketIdx = 95;
+                buckets[bucketIdx].push(d.glucose);
+            });
+
+            // Robust check: Fill empty buckets using nearest neighbor so the curve doesn't break
+            for (let i = 0; i < 96; i++) {
+                if (buckets[i].length === 0) {
+                    for (let j = 1; j < 96; j++) {
+                        let left = buckets[(i - j + 96) % 96];
+                        let right = buckets[(i + j) % 96];
+                        if (left.length > 0) { buckets[i] = [...left]; break; }
+                        if (right.length > 0) { buckets[i] = [...right]; break; }
+                    }
+                }
+            }
+
+            const xValues = [], p5 = [], p25 = [], p50 = [], p75 = [], p95 = [];
+
+            // Add an extra bucket at index 96 mirroring index 0 to smoothly connect 24:00 back to 00:00
+            for (let i = 0; i <= 96; i++) {
+                let idx = i === 96 ? 0 : i;
+                let vals = buckets[idx];
+                
+                xValues.push((i * 15) / 60); // X-axis representation in numerical hours (0 to 24)
+                p5.push(getPercentile(vals, 0.05));
+                p25.push(getPercentile(vals, 0.25));
+                p50.push(getPercentile(vals, 0.50));
+                p75.push(getPercentile(vals, 0.75));
+                p95.push(getPercentile(vals, 0.95));
+            }
+
+            const traces = [
+                // 5% (Invisible bottom baseline)
+                { x: xValues, y: p5, type: 'scatter', mode: 'lines', line: {width: 0, shape: 'spline'}, showlegend: false, hoverinfo: 'skip' },
+                // 95% (Fills down to 5% with light blue)
+                { x: xValues, y: p95, type: 'scatter', mode: 'lines', fill: 'tonexty', fillcolor: 'rgba(59, 130, 246, 0.15)', line: {width: 0, shape: 'spline'}, name: '5% - 95% Range' },
+                // 25% (Invisible middle baseline)
+                { x: xValues, y: p25, type: 'scatter', mode: 'lines', line: {width: 0, shape: 'spline'}, showlegend: false, hoverinfo: 'skip' },
+                // 75% (Fills down to 25% with medium blue)
+                { x: xValues, y: p75, type: 'scatter', mode: 'lines', fill: 'tonexty', fillcolor: 'rgba(59, 130, 246, 0.4)', line: {width: 0, shape: 'spline'}, name: '25% - 75% Range' },
+                // 50% Median (Solid dark blue line)
+                { x: xValues, y: p50, type: 'scatter', mode: 'lines', line: {color: '#0f4a8a', width: 3, shape: 'spline'}, name: 'Median (50%)' }
+            ];
+
+            const layout = {
+                autosize: true, margin: { t: 40, l: 50, r: 60, b: 40 }, hovermode: 'x unified',
+                xaxis: {
+                    tickvals: [0, 3, 6, 9, 12, 15, 18, 21, 24],
+                    ticktext: ['00:00', '03:00', '06:00', '09:00', '12:00', '15:00', '18:00', '21:00', '00:00'],
+                    range: [0, 24],
+                    showgrid: true, gridcolor: '#cbd5e1', gridwidth: 1, griddash: 'dash' // Creates the dashed vertical lines
+                },
+                yaxis: { title: 'mmol/L', showgrid: false }, // Hide horizontal grid to mimic the image
+                shapes: [
+                    { type: 'line', x0: 0, x1: 24, y0: TARGET_MAX, y1: TARGET_MAX, line: {color: '#22c55e', width: 2} },
+                    { type: 'line', x0: 0, x1: 24, y0: TARGET_MIN, y1: TARGET_MIN, line: {color: '#22c55e', width: 2} }
+                ],
+                annotations: [
+                    // Right-side static percentage labels
+                    { x: 24.1, y: p95[96], text: '95%', xanchor: 'left', yanchor: 'middle', showarrow: false, font: {color: '#64748b', size: 14} },
+                    { x: 24.1, y: p75[96], text: '75%', xanchor: 'left', yanchor: 'middle', showarrow: false, font: {color: '#64748b', size: 14} },
+                    { x: 24.1, y: p50[96], text: '50%', xanchor: 'left', yanchor: 'middle', showarrow: false, font: {color: '#0f4a8a', size: 16, weight: 'bold'} },
+                    { x: 24.1, y: p25[96], text: '25%', xanchor: 'left', yanchor: 'middle', showarrow: false, font: {color: '#64748b', size: 14} },
+                    { x: 24.1, y: p5[96], text: '5%', xanchor: 'left', yanchor: 'middle', showarrow: false, font: {color: '#64748b', size: 14} },
+                    // Left-side target thresholds
+                    { x: -0.1, y: TARGET_MAX, text: TARGET_MAX.toString(), xanchor: 'right', yanchor: 'middle', showarrow: false, font: {color: '#000', weight: 'bold'} },
+                    { x: -0.1, y: TARGET_MIN, text: TARGET_MIN.toString(), xanchor: 'right', yanchor: 'middle', showarrow: false, font: {color: '#000', weight: 'bold'} }
+                ]
+            };
+
+            Plotly.newPlot('agpChart', traces, layout, {responsive: true});
+        }
+    </script>
+</body>
+</html>
